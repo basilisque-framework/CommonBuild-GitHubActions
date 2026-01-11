@@ -240,6 +240,7 @@ jobs:
       if: inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview'
       with:
         files: src/**/*.nupkg
+        fail_on_unmatched_files: false
         tag_name: v${{ steps.version_padded.outputs.version }}
         prerelease: ${{ inputs.basBuildType != 'Release' }}
     
