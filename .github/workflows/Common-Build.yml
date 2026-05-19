@@ -31,6 +31,11 @@ on:
         default: 'src/*.slnx'
         required: false
         type: string
+      artifactsPath:
+        description: 'The path where build artifacts will be stored. The default is "src/artifacts".'
+        default: 'src/artifacts'
+        required: false
+        type: string
       dotNetVersion:
         description: 'The version of .Net that will be used for the build.'
         default: 10.0.x
@@ -71,6 +76,31 @@ on:
         default: ''
         required: false
         type: string
+      versioningProjectName:
+        description: 'The name of the project for which the version should be determined. This is only necessary if there are multiple projects in the repository and therefore multiple gitversion.json files are present.'
+        default: ''
+        required: false
+        type: string
+      basVersionMajor:
+        description: 'The major version number for the build.'
+        default: ''
+        required: false
+        type: string
+      basVersionMinor:
+        description: 'The minor version number for the build.'
+        default: ''
+        required: false
+        type: string
+      basVersionBuild:
+        description: 'The build version number for the build.'
+        default: ''
+        required: false
+        type: string
+      basVersionRevision:
+        description: 'The revision version number for the build.'
+        default: ''
+        required: false
+        type: string
 jobs:
   build:
 
@@ -81,6 +111,7 @@ jobs:
       run: |
         echo basBuildType = ${{ inputs.basBuildType }}
         echo projectOrSolution = ${{ inputs.projectOrSolution }}
+        echo artifactsPath = ${{ inputs.artifactsPath }}
         echo dotNetVersion = ${{ inputs.dotNetVersion }}
         echo publishTargetFramework = ${{ inputs.publishTargetFramework }}
         echo runDotnetTest = ${{ inputs.runDotnetTest }}
@@ -89,14 +120,18 @@ jobs:
         echo runsOn = ${{ inputs.runsOn }}
         echo sonarProjectKey = ${{ inputs.sonarProjectKey }}
         echo sonarOrganization = ${{ inputs.sonarOrganization }}
-    
+        echo versioningProjectName = ${{ inputs.versioningProjectName }}
+        echo basVersionMajor = ${{ inputs.basVersionMajor }}
+        echo basVersionMinor = ${{ inputs.basVersionMinor }}
+        echo basVersionBuild = ${{ inputs.basVersionBuild }}
+        echo basVersionRevision = ${{ inputs.basVersionRevision }}
     - name: Validate Input Parameters
       if: inputs.basBuildType != 'Alpha' && inputs.basBuildType != 'CI' && inputs.basBuildType != 'Preview' && inputs.basBuildType != 'RC' && inputs.basBuildType != 'Release'
       run: |
         echo 'Please check the basBuildType input. Supported values are ''Alpha'', ''CI'', ''Preview'', ''RC'' and ''Release''.'
         exit 1
     
-    - name: Set up JDK 17 # necessary for Sonar
+    - name: Set up JDK for Sonar # necessary for Sonar
       uses: actions/setup-java@v5
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       with:
@@ -137,35 +172,6 @@ jobs:
         mkdir -p .sonar/scanner
         dotnet tool update dotnet-sonarscanner --tool-path .sonar/scanner
     
-    - name: Git Semantic Versioning
-      id: versioning
-      uses: PaulHatch/semantic-version@v6.0.2
-      with:
-        branch: ${{ github.ref_name }} # default is HEAD
-        major_pattern: "BREAKING CHANGE:" # default is (MAJOR)
-        minor_pattern: "feat:" # default is (MINOR)
-        version_format: "${major}.${minor}.${patch}${{ inputs.basBuildType != 'Release' && format('-{0}${{increment}}', inputs.basBuildType) || '' }}"
-        # If true, the body of commits will also be searched for major/minor patterns to determine the version type.
-        #search_commit_body: # default is false
-    
-    - name: Compose padded version
-      id: version_padded
-      run: |
-        MAJOR="${{ steps.versioning.outputs.major }}"
-        MINOR="${{ steps.versioning.outputs.minor }}"
-        PATCH="${{ steps.versioning.outputs.patch }}"
-        INCREMENT="${{ steps.versioning.outputs.increment }}"
-        LABEL="${{ inputs.basBuildType }}"
-        
-        if [[ "$LABEL" == "Release" ]]; then
-          VERSION="$MAJOR.$MINOR.$PATCH"
-        else
-          PADDED=$(printf "%05d" "$INCREMENT")
-          VERSION="$MAJOR.$MINOR.$PATCH-${LABEL}${PADDED}"
-        fi
-        
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-    
     - name: Dotnet Restore
       run: dotnet restore ${{ inputs.projectOrSolution }}
     
@@ -184,18 +190,18 @@ jobs:
         .sonar/scanner/dotnet-sonarscanner begin /k:"${{ inputs.sonarProjectKey }}" /o:"${{ inputs.sonarOrganization }}" /d:sonar.token="${{ secrets.SONAR_TOKEN }}" /d:sonar.host.url="https://sonarcloud.io" /d:sonar.cs.opencover.reportsPaths="**/TestResults/**/*opencover.xml" $PR_PARAMS
     
     - name: Dotnet Build
-      run: dotnet build ${{ inputs.projectOrSolution }} -c Release --no-restore -p:BAS_CB_VersionMajor=${{ steps.versioning.outputs.major }} -p:BAS_CB_VersionMinor=${{ steps.versioning.outputs.minor }} -p:BAS_CB_VersionBuild=${{ steps.versioning.outputs.patch }} -p:BAS_CB_VersionRevision=${{ steps.versioning.outputs.increment }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
+      run: dotnet build ${{ inputs.projectOrSolution }} -c Release --no-restore -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
         
     - name: Dotnet Test
       if: inputs.runDotnetTest
       run: |
         TARGET="${{ inputs.projectOrSolution }}"
         if [[ "$TARGET" == *.sln || "$TARGET" == *.slnx ]]; then
-          dotnet test --solution "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ steps.versioning.outputs.major }} -p:BAS_CB_VersionMinor=${{ steps.versioning.outputs.minor }} -p:BAS_CB_VersionBuild=${{ steps.versioning.outputs.patch }} -p:BAS_CB_VersionRevision=${{ steps.versioning.outputs.increment }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
+          dotnet test --solution "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
         elif [[ "$TARGET" == *.csproj ]]; then
-          dotnet test --project "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ steps.versioning.outputs.major }} -p:BAS_CB_VersionMinor=${{ steps.versioning.outputs.minor }} -p:BAS_CB_VersionBuild=${{ steps.versioning.outputs.patch }} -p:BAS_CB_VersionRevision=${{ steps.versioning.outputs.increment }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
+          dotnet test --project "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
         else
-          dotnet test "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ steps.versioning.outputs.major }} -p:BAS_CB_VersionMinor=${{ steps.versioning.outputs.minor }} -p:BAS_CB_VersionBuild=${{ steps.versioning.outputs.patch }} -p:BAS_CB_VersionRevision=${{ steps.versioning.outputs.increment }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
+          dotnet test "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
         fi
     
     - name: End Sonar Analysis
@@ -207,29 +213,80 @@ jobs:
     
     - name: Dotnet Publish
       if: inputs.runDotnetPublish
-      run: dotnet publish ${{ inputs.projectOrSolution }} -c Release --no-build ${{ inputs.publishTargetFramework != '' && format('-f {0}', inputs.publishTargetFramework) || '' }} -p:BAS_CB_VersionMajor=${{ steps.versioning.outputs.major }} -p:BAS_CB_VersionMinor=${{ steps.versioning.outputs.minor }} -p:BAS_CB_VersionBuild=${{ steps.versioning.outputs.patch }} -p:BAS_CB_VersionRevision=${{ steps.versioning.outputs.increment }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
+      run: dotnet publish ${{ inputs.projectOrSolution }} -c Release --no-build ${{ inputs.publishTargetFramework != '' && format('-f {0}', inputs.publishTargetFramework) || '' }} -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
     
     - name: Attach Build Artifacts to Workflow Run
       if: inputs.runDotnetPublish
       uses: actions/upload-artifact@v7
       with:
         name: Artifacts
-        path: src/artifacts/publish/**
+        path: ${{ inputs.artifactsPath }}/publish/**
         if-no-files-found: error
         retention-days: 10
     
     - name: Dotnet Pack
       if: inputs.runDotnetPack
-      run: dotnet pack ${{ inputs.projectOrSolution }} -c Release -p:BAS_CB_VersionMajor=${{ steps.versioning.outputs.major }} -p:BAS_CB_VersionMinor=${{ steps.versioning.outputs.minor }} -p:BAS_CB_VersionBuild=${{ steps.versioning.outputs.patch }} -p:BAS_CB_VersionRevision=${{ steps.versioning.outputs.increment }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
+      run: dotnet pack ${{ inputs.projectOrSolution }} -c Release -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
     
     - name: Attach NuGet Artifacts to Workflow Run
       if: inputs.runDotnetPack
       uses: actions/upload-artifact@v7
       with:
         name: NuGet Packages
-        path: src/artifacts/package/**/*.nupkg
+        path: ${{ inputs.artifactsPath }}/package/**/*.nupkg
         if-no-files-found: error
         retention-days: 10
+    
+    - name: Versioning
+      id: versioning
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        $label = '${{ inputs.basBuildType }}'
+
+        # Prefer version data produced during build (gitversion.json), fallback to workflow inputs.
+        $gitVersionFile = Get-ChildItem -Path '${{ inputs.artifactsPath }}/obj/${{ inputs.versioningProjectName }}' -Recurse -Filter 'gitversion.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        if ($null -ne $gitVersionFile) {
+          Write-Host "Using gitversion.json from $($gitVersionFile.FullName)"
+          $gitVersionJson = Get-Content -Raw $gitVersionFile.FullName | ConvertFrom-Json
+
+          $majorMinorPatch = [string]$gitVersionJson.MajorMinorPatch
+          if ([string]::IsNullOrWhiteSpace($majorMinorPatch)) {
+            throw 'gitversion.json was found but does not contain MajorMinorPatch.'
+          }
+
+          $incrementString = $gitVersionJson.CommitsSinceVersionSource
+
+        } else {
+          Write-Host 'No gitversion.json found. Falling back to basVersion* inputs.'
+
+          $major = '${{ inputs.basVersionMajor }}'
+          $minor = '${{ inputs.basVersionMinor }}'
+          $patch = '${{ inputs.basVersionBuild }}'
+          $incrementString = '${{ inputs.basVersionRevision }}'
+
+          if ([string]::IsNullOrWhiteSpace($major) -or [string]::IsNullOrWhiteSpace($minor) -or [string]::IsNullOrWhiteSpace($patch)) {
+            throw 'No gitversion.json found and fallback values basVersionMajor/basVersionMinor/basVersionBuild are incomplete.'
+          }
+
+          $majorMinorPatch = "$major.$minor.$patch"
+        }
+
+        if ($label -eq 'Release') {
+          $version = "$majorMinorPatch"
+        } else {
+          if ([string]::IsNullOrWhiteSpace($incrementString) -or -not ($incrementString -match '^\d+$')) {
+            throw 'The version increment is missing or not numeric.'
+          }
+          $increment = [int]$incrementString
+              
+          $padded = '{0:D5}' -f $increment
+          $version = "$majorMinorPatch-$label$padded"
+        }
+
+        "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
     
     - name: Create Git Tag
       uses: actions/github-script@v9
@@ -238,7 +295,7 @@ jobs:
           github.rest.git.createRef({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            ref: 'refs/tags/v${{ steps.version_padded.outputs.version }}',
+            ref: 'refs/tags/v${{ steps.versioning.outputs.version }}',
             sha: context.sha
           })
     
@@ -248,7 +305,7 @@ jobs:
       with:
         files: src/**/*.nupkg
         fail_on_unmatched_files: false
-        tag_name: v${{ steps.version_padded.outputs.version }}
+        tag_name: v${{ steps.versioning.outputs.version }}
         prerelease: ${{ inputs.basBuildType != 'Release' }}
     
     - name: Dotnet NuGet Push NuGet.org
