@@ -195,7 +195,7 @@ jobs:
     - name: Dotnet Test
       if: inputs.runDotnetTest
       run: |
-        TARGET="${{ inputs.projectOrSolution }}"
+        TARGET=$(ls ${{ inputs.projectOrSolution }} 2>/dev/null | head -n 1)
         if [[ "$TARGET" == *.sln || "$TARGET" == *.slnx ]]; then
           dotnet test --solution "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
         elif [[ "$TARGET" == *.csproj ]]; then
