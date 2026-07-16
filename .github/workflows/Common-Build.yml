@@ -135,7 +135,7 @@ jobs:
       uses: actions/setup-java@v5
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       with:
-        java-version: 17
+        java-version: 21
         distribution: 'zulu' # Alternative distribution options are available.
     
     - name: Checkout Repository
