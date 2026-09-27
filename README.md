@@ -20,5 +20,43 @@
 
 This project provides common GitHub Actions for projects that use the Basilisque framework.  
 
+## Repository Verification
+The reusable `Common-Build.yml` workflow accepts an optional `verificationScript` input.
+It is a repository-relative path to a PowerShell script in the **calling repository**.
+The default is empty, so existing callers do not run an additional step.
+
+The script runs after the selected build/publish/pack steps, before NuGet artifact
+upload, Git tagging, release creation, and package pushes. A script failure fails
+the job and prevents those subsequent steps. Throw on failed checks or propagate
+nonzero exit codes; do not catch failures and return success.
+
+The script receives `BAS_CB_BUILD_TYPE` and `BAS_CB_ARTIFACTS_PATH` from the workflow
+inputs and runs from the checked-out repository root. The existing `runDotnetTest`
+switch remains independent and retains its original behavior. Verification runs
+after Sonar analysis has ended; this hook does not import test coverage into Sonar.
+
+For package integration tests that need the producer package first:
+
+```yaml
+jobs:
+    build:
+        uses: basilisque-framework/CommonBuild-GitHubActions/.github/workflows/Common-Build.yml@v1.0
+        with:
+            basBuildType: CI
+            runDotnetPack: true
+            runDotnetTest: false
+            dotNetVersion: |
+                8.0.x
+                10.0.x
+            verificationScript: '.github/scripts/Test-Integration.ps1'
+        secrets: inherit
+```
+
+`dotNetVersion` supports the multi-line SDK list provided by `actions/setup-dotnet`.
+Install every runtime needed by the tests rather than relying on the runner image.
+
+Publish this workflow change to the referenced `v1.0` branch **before** adding the
+new input to a caller. Until then, GitHub rejects the caller's unknown input.
+
 ## License
 The Basilisque framework (including this repository) is licensed under the [Apache License, Version 2.0](LICENSE.txt).

@@ -62,6 +62,11 @@ on:
         default: false
         required: false
         type: boolean
+      verificationScript:
+        description: 'Optional repository-relative PowerShell script run after build/publish/pack and before tagging or releasing packages. A failure fails the build.'
+        default: ''
+        required: false
+        type: string
       runsOn:
         description: 'Defines the type of machine to run the job on.'
         default: ubuntu-latest
@@ -109,11 +114,13 @@ jobs:
 
     steps:
     - name: Print Input Parameters
+      env:
+        DOTNET_VERSION: ${{ inputs.dotNetVersion }}
       run: |
         echo basBuildType = ${{ inputs.basBuildType }}
         echo projectOrSolution = ${{ inputs.projectOrSolution }}
         echo artifactsPath = ${{ inputs.artifactsPath }}
-        echo dotNetVersion = ${{ inputs.dotNetVersion }}
+        echo "dotNetVersion = $DOTNET_VERSION"
         echo publishTargetFramework = ${{ inputs.publishTargetFramework }}
         echo runDotnetTest = ${{ inputs.runDotnetTest }}
         echo runDotnetPublish = ${{ inputs.runDotnetPublish }}
@@ -229,6 +236,20 @@ jobs:
       if: inputs.runDotnetPack
       run: dotnet pack ${{ inputs.projectOrSolution }} -c Release -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
     
+    - name: Run Repository Verification
+      if: inputs.verificationScript != ''
+      shell: pwsh
+      env:
+        VERIFICATION_SCRIPT: ${{ inputs.verificationScript }}
+        BAS_CB_BUILD_TYPE: ${{ inputs.basBuildType }}
+        BAS_CB_ARTIFACTS_PATH: ${{ inputs.artifactsPath }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        $global:LASTEXITCODE = 0
+        & (Join-Path $env:GITHUB_WORKSPACE $env:VERIFICATION_SCRIPT)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: Attach NuGet Artifacts to Workflow Run
       if: inputs.runDotnetPack
       uses: actions/upload-artifact@v7
