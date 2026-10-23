@@ -182,6 +182,60 @@ jobs:
     
     - name: Dotnet Restore
       run: dotnet restore ${{ inputs.projectOrSolution }}
+
+    - name: Warm up GitVersion serially
+      if: runner.os == 'Linux'
+      env:
+        PROJECT_OR_SOLUTION: ${{ inputs.projectOrSolution }}
+        VERSIONING_PROJECT_NAME: ${{ inputs.versioningProjectName }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$PROJECT_OR_SOLUTION" == *.csproj ]]; then
+          project="$PROJECT_OR_SOLUTION"
+        else
+          projects=()
+          mapfile -t projects < <(dotnet sln "$PROJECT_OR_SOLUTION" list | grep -E '\.csproj$' || true)
+
+          if [[ -n "$VERSIONING_PROJECT_NAME" ]]; then
+            if ((${#projects[@]})); then
+              for candidate in "${projects[@]}"; do
+                if [[ "$(basename "$candidate" .csproj)" == "$VERSIONING_PROJECT_NAME" ]]; then
+                  project="$candidate"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "${project:-}" ]]; then
+              echo "Could not find versioning project '$VERSIONING_PROJECT_NAME' in '$PROJECT_OR_SOLUTION'." >&2
+              exit 1
+            fi
+          else
+            project="${projects[0]:-}"
+          fi
+        fi
+
+        if [[ -z "${project:-}" ]]; then
+          echo "Could not find a C# project in '$PROJECT_OR_SOLUTION' to warm up GitVersion." >&2
+          exit 1
+        fi
+
+        properties="$(dotnet msbuild "$project" -getProperty:TargetFramework,TargetFrameworks)"
+        target_framework="$(jq -r '(.Properties.TargetFrameworks // "") as $frameworks | if $frameworks != "" then $frameworks else .Properties.TargetFramework end' <<< "$properties")"
+        target_framework="${target_framework%%;*}"
+
+        if [[ -z "$target_framework" ]]; then
+          echo "Could not determine a target framework for '$project'." >&2
+          exit 1
+        fi
+
+        echo "Warming up GitVersion with '$project' for '$target_framework'."
+        dotnet msbuild "$project" \
+          -target:GetVersion \
+          -property:TargetFramework="$target_framework" \
+          -property:Configuration=Release \
+          -maxcpucount:1 \
+          -nodeReuse:false
     
     - name: Start Sonar Analysis
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
