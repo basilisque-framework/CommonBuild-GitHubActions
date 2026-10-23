@@ -191,11 +191,32 @@ jobs:
       run: |
         set -euo pipefail
 
-        if [[ "$PROJECT_OR_SOLUTION" == *.csproj ]]; then
-          project="$PROJECT_OR_SOLUTION"
+        if [[ -f "$PROJECT_OR_SOLUTION" ]]; then
+          target="$PROJECT_OR_SOLUTION"
         else
+          if ! matches="$(compgen -G "$PROJECT_OR_SOLUTION" | sort)"; then
+            echo "No project or solution matches '$PROJECT_OR_SOLUTION'." >&2
+            exit 1
+          fi
+          mapfile -t targets <<< "$matches"
+          target="${targets[0]}"
+        fi
+
+        if [[ "$target" == *.csproj ]]; then
+          project="$target"
+        else
+          if ! listing="$(dotnet sln "$target" list)"; then
+            printf '%s\n' "$listing" >&2
+            exit 1
+          fi
           projects=()
-          mapfile -t projects < <(dotnet sln "$PROJECT_OR_SOLUTION" list | grep -E '\.csproj$' || true)
+          while IFS= read -r candidate; do
+            candidate="${candidate%$'\r'}"
+            candidate="${candidate//\\//}"
+            if [[ "$candidate" == *.csproj ]]; then
+              projects+=("$candidate")
+            fi
+          done <<< "$listing"
 
           if [[ -n "$VERSIONING_PROJECT_NAME" ]]; then
             if ((${#projects[@]})); then
@@ -213,6 +234,11 @@ jobs:
           else
             project="${projects[0]:-}"
           fi
+
+          # dotnet sln list returns paths relative to the solution, not the working directory.
+          if [[ -n "${project:-}" && "$project" != /* ]]; then
+            project="$(dirname "$target")/$project"
+          fi
         fi
 
         if [[ -z "${project:-}" ]]; then
@@ -220,8 +246,12 @@ jobs:
           exit 1
         fi
 
-        properties="$(dotnet msbuild "$project" -getProperty:TargetFramework,TargetFrameworks)"
-        target_framework="$(jq -r '(.Properties.TargetFrameworks // "") as $frameworks | if $frameworks != "" then $frameworks else .Properties.TargetFramework end' <<< "$properties")"
+        echo "Reading target frameworks from '$project'."
+        if ! properties="$(dotnet msbuild "$project" -property:Configuration=Release -getProperty:TargetFramework,TargetFrameworks)"; then
+          printf '%s\n' "$properties" >&2
+          exit 1
+        fi
+        target_framework="$(jq -r '(.Properties.TargetFramework // "") as $framework | if $framework != "" then $framework else (.Properties.TargetFrameworks // "") end' <<< "$properties")"
         target_framework="${target_framework%%;*}"
 
         if [[ -z "$target_framework" ]]; then

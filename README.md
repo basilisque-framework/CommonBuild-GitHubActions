@@ -20,6 +20,17 @@
 
 This project provides common GitHub Actions for projects that use the Basilisque framework.  
 
+## GitVersion Warm-up
+On Linux, the workflow runs GitVersion's `GetVersion` target once after restore
+and before the parallel build to avoid the concurrent mutex initialization failure
+reported in [GitTools/GitVersion#5367](https://github.com/GitTools/GitVersion/issues/5367).
+It uses the supplied C# project, or `versioningProjectName` (the first C# project
+when omitted) from the supplied solution. Project paths listed by the .NET CLI
+are resolved relative to the solution directory. When `projectOrSolution` is a
+wildcard, the first matching file in sorted order is used for the warm-up.
+For multi-target projects, only the first target framework is warmed up.
+The subsequent build remains parallel.
+
 ## Repository Verification
 The reusable `Common-Build.yml` workflow accepts an optional `verificationScript` input.
 It is a repository-relative path to a PowerShell script in the **calling repository**.
