@@ -111,6 +111,8 @@ jobs:
   build:
 
     runs-on: ${{ inputs.runsOn }}
+    env:
+      NUGET_PACKAGE_GLOB: ${{ inputs.artifactsPath }}/package/**/*.nupkg
 
     steps:
     - name: Print Input Parameters
@@ -339,7 +341,7 @@ jobs:
       uses: actions/upload-artifact@v7
       with:
         name: NuGet Packages
-        path: ${{ inputs.artifactsPath }}/package/**/*.nupkg
+        path: ${{ env.NUGET_PACKAGE_GLOB }}
         if-no-files-found: error
         retention-days: 10
     
@@ -409,7 +411,7 @@ jobs:
       uses: softprops/action-gh-release@v3
       if: inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview'
       with:
-        files: src/**/*.nupkg
+        files: ${{ env.NUGET_PACKAGE_GLOB }}
         fail_on_unmatched_files: false
         tag_name: v${{ steps.versioning.outputs.version }}
         prerelease: ${{ inputs.basBuildType != 'Release' }}
@@ -423,9 +425,16 @@ jobs:
 
     - name: Dotnet NuGet Push NuGet.org
       if: inputs.runDotnetPack && (inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview')
-      # run: dotnet nuget push src/**/*.nupkg --api-key ${{steps.nugetlogin.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json
-      run: dotnet nuget push src/**/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
+      shell: pwsh
+      env:
+        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      # For OIDC, set NUGET_API_KEY from steps.nugetlogin.outputs.NUGET_API_KEY.
+      run: dotnet nuget push "$env:NUGET_PACKAGE_GLOB" --api-key "$env:NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
     
     - name: Dotnet NuGet Push GitHub
       if: inputs.runDotnetPack
-      run: dotnet nuget push src/**/*.nupkg --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json -k ${{ secrets.GITHUB_TOKEN }}
+      shell: pwsh
+      env:
+        GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: dotnet nuget push "$env:NUGET_PACKAGE_GLOB" --source "$env:GITHUB_PACKAGES_SOURCE" --api-key "$env:GITHUB_TOKEN"
