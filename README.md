@@ -31,6 +31,17 @@ wildcard, the first matching file in sorted order is used for the warm-up.
 For multi-target projects, only the first target framework is warmed up.
 The subsequent build remains parallel.
 
+## Workflow Versioning
+The workflow uses GitVersion's `VersionSourceDistance` for the prerelease revision.
+For backward compatibility, it falls back to `CommitsSinceVersionSource` when
+using older GitVersion releases that do not provide `VersionSourceDistance`.
+
+Run the workflow versioning tests with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Test-WorkflowVersioning.ps1
+```
+
 ## Repository Verification
 The reusable `Common-Build.yml` workflow accepts an optional `verificationScript` input.
 It is a repository-relative path to a PowerShell script in the **calling repository**.

@@ -365,7 +365,11 @@ jobs:
             throw 'gitversion.json was found but does not contain MajorMinorPatch.'
           }
 
-          $incrementString = $gitVersionJson.CommitsSinceVersionSource
+          $incrementString = $gitVersionJson.VersionSourceDistance
+          if ([string]::IsNullOrWhiteSpace([string]$incrementString)) {
+            # Backward compatibility with GitVersion versions that only expose the legacy variable.
+            $incrementString = $gitVersionJson.CommitsSinceVersionSource
+          }
 
         } else {
           Write-Host 'No gitversion.json found. Falling back to basVersion* inputs.'
