@@ -140,25 +140,25 @@ jobs:
       run: |
         echo 'Please check the basBuildType input. Supported values are ''Alpha'', ''CI'', ''Preview'', ''RC'' and ''Release''.'
         exit 1
-    
+
     - name: Set up JDK for Sonar # necessary for Sonar
       uses: actions/setup-java@v5
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       with:
         java-version: 21
         distribution: 'zulu' # Alternative distribution options are available.
-    
+
     - name: Checkout Repository
       uses: actions/checkout@v6
       with:
         fetch-depth: 0 # Shallow clones should be disabled for versioning and a better relevancy of sonar analysis
-    
+
     - name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
         dotnet-version: ${{ inputs.dotNetVersion }}
         dotnet-quality: 'ga'
-    
+
     - name: Cache SonarCloud packages
       uses: actions/cache@v5
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
@@ -166,7 +166,7 @@ jobs:
         path: ~\sonar\cache
         key: ${{ runner.os }}-sonar
         restore-keys: ${{ runner.os }}-sonar
-    
+
     - name: Cache SonarCloud scanner
       id: cache-sonar-scanner
       uses: actions/cache@v5
@@ -175,13 +175,13 @@ jobs:
         path: .\.sonar\scanner
         key: ${{ runner.os }}-sonar-scanner
         restore-keys: ${{ runner.os }}-sonar-scanner
-    
+
     - name: Install SonarCloud scanner
       if: steps.cache-sonar-scanner.outputs.cache-hit != 'true' && inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       run: |
         mkdir -p .sonar/scanner
         dotnet tool update dotnet-sonarscanner --tool-path .sonar/scanner
-    
+
     - name: Dotnet Restore
       run: dotnet restore ${{ inputs.projectOrSolution }}
 
@@ -268,7 +268,7 @@ jobs:
           -property:Configuration=Release \
           -maxcpucount:1 \
           -nodeReuse:false
-    
+
     - name: Start Sonar Analysis
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       env:
@@ -280,12 +280,12 @@ jobs:
         else
           PR_PARAMS=""
         fi
-        
+
         .sonar/scanner/dotnet-sonarscanner begin /k:"${{ inputs.sonarProjectKey }}" /o:"${{ inputs.sonarOrganization }}" /d:sonar.token="${{ secrets.SONAR_TOKEN }}" /d:sonar.host.url="https://sonarcloud.io" /d:sonar.cs.opencover.reportsPaths="**/TestResults/**/*opencover.xml" $PR_PARAMS
-    
+
     - name: Dotnet Build
       run: dotnet build ${{ inputs.projectOrSolution }} -c Release --no-restore -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
-        
+
     - name: Dotnet Test
       if: inputs.runDotnetTest
       run: |
@@ -297,18 +297,18 @@ jobs:
         else
           dotnet test "$TARGET" -c Release --no-build --verbosity normal --coverage -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
         fi
-    
+
     - name: End Sonar Analysis
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       env:
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       run: |
         .sonar/scanner/dotnet-sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
-    
+
     - name: Dotnet Publish
       if: inputs.runDotnetPublish
       run: dotnet publish ${{ inputs.projectOrSolution }} -c Release --no-build ${{ inputs.publishTargetFramework != '' && format('-f {0}', inputs.publishTargetFramework) || '' }} -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
-    
+
     - name: Attach Build Artifacts to Workflow Run
       if: inputs.runDotnetPublish
       uses: actions/upload-artifact@v7
@@ -317,11 +317,11 @@ jobs:
         path: ${{ inputs.artifactsPath }}/publish/**
         if-no-files-found: error
         retention-days: 10
-    
+
     - name: Dotnet Pack
       if: inputs.runDotnetPack
       run: dotnet pack ${{ inputs.projectOrSolution }} -c Release -p:BAS_CB_VersionMajor=${{ inputs.basVersionMajor }} -p:BAS_CB_VersionMinor=${{ inputs.basVersionMinor }} -p:BAS_CB_VersionBuild=${{ inputs.basVersionBuild }} -p:BAS_CB_VersionRevision=${{ inputs.basVersionRevision }} -p:BAS_CB_BuildType=${{ inputs.basBuildType }}
-    
+
     - name: Run Repository Verification
       if: inputs.verificationScript != ''
       shell: pwsh
@@ -344,7 +344,7 @@ jobs:
         path: ${{ env.NUGET_PACKAGE_GLOB }}
         if-no-files-found: error
         retention-days: 10
-    
+
     - name: Versioning
       id: versioning
       shell: pwsh
@@ -393,13 +393,13 @@ jobs:
             throw 'The version increment is missing or not numeric.'
           }
           $increment = [int]$incrementString
-              
+
           $padded = '{0:D5}' -f $increment
           $version = "$majorMinorPatch-$label$padded"
         }
 
         "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-    
+
     - name: Create Git Tag
       uses: actions/github-script@v9
       with:
@@ -410,7 +410,7 @@ jobs:
             ref: 'refs/tags/v${{ steps.versioning.outputs.version }}',
             sha: context.sha
           })
-    
+
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v3
       if: inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview'
@@ -419,7 +419,7 @@ jobs:
         fail_on_unmatched_files: false
         tag_name: v${{ steps.versioning.outputs.version }}
         prerelease: ${{ inputs.basBuildType != 'Release' }}
-    
+
     # - name: NuGet login (OIDC → temp API key) # Get a short-lived NuGet API key
     #   if: inputs.runDotnetPack && (inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview')
     #   uses: NuGet/login@v1
@@ -434,7 +434,7 @@ jobs:
         NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
       # For OIDC, set NUGET_API_KEY from steps.nugetlogin.outputs.NUGET_API_KEY.
       run: dotnet nuget push "$env:NUGET_PACKAGE_GLOB" --api-key "$env:NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
-    
+
     - name: Dotnet NuGet Push GitHub
       if: inputs.runDotnetPack
       shell: pwsh

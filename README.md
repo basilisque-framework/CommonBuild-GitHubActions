@@ -68,8 +68,8 @@ jobs:
             runDotnetPack: true
             runDotnetTest: false
             dotNetVersion: |
-                8.0.x
                 10.0.x
+                11.0.x
             verificationScript: '.github/scripts/Test-Integration.ps1'
         secrets: inherit
 ```
