@@ -22,7 +22,7 @@ This project provides common GitHub Actions for projects that use the Basilisque
 
 ## GitVersion Warm-up
 On Linux, the workflow runs GitVersion's `GetVersion` target once after restore
-and before the parallel build to avoid the concurrent mutex initialization failure
+when the selected project has GitVersion enabled. This avoids the concurrent mutex initialization failure
 reported in [GitTools/GitVersion#5367](https://github.com/GitTools/GitVersion/issues/5367).
 It uses the supplied C# project, or `versioningProjectName` (the first C# project
 when omitted) from the supplied solution. Project paths listed by the .NET CLI
@@ -32,9 +32,28 @@ For multi-target projects, only the first target framework is warmed up.
 The subsequent build remains parallel.
 
 ## Workflow Versioning
-The workflow uses GitVersion's `VersionSourceDistance` for the prerelease revision.
-For backward compatibility, it falls back to `CommitsSinceVersionSource` when
-using older GitVersion releases that do not provide `VersionSourceDistance`.
+The workflow passes `basBuildType` to the build. The target projects determine
+their versions, and pack reuses the build outputs. The workflow records the
+checked-out commit and the built versions in the run summary.
+
+Preview, RC and stable releases run on `main`, `master` or
+`release/<major>.<minor>`. A stable release must match its release branch's line.
+These runs tag the verified build. Alpha and CI runs publish their configured
+artifacts without creating a Git tag.
+
+The release version comes from the built NuGet packages. Set
+`versioningPackageId` when packages have different versions. For a build without
+packages, the workflow reads GitVersion's `SemVer`; use `versioningProjectName` to
+select a project when needed. `releaseVersion` can assert the expected version
+or supply it for a non-packable project without GitVersion.
+
+### Migrating existing callers
+
+- Upgrade CommonBuild and this reusable workflow together for release runs.
+- Remove `basVersionMajor`, `basVersionMinor`, `basVersionBuild` and
+  `basVersionRevision`. Configure the version in the target project.
+- For a stable run whose commit is already tagged, reuse the original artifacts
+  to retry publication.
 
 Run the workflow versioning tests with:
 
@@ -77,8 +96,7 @@ jobs:
 `dotNetVersion` supports the multi-line SDK list provided by `actions/setup-dotnet`.
 Install every runtime needed by the tests rather than relying on the runner image.
 
-Publish this workflow change to the referenced `v1.0` branch **before** adding the
-new input to a caller. Until then, GitHub rejects the caller's unknown input.
+Update the workflow reference in a caller when switching to a new workflow version.
 
 ## License
 The Basilisque framework (including this repository) is licensed under the [Apache License, Version 2.0](LICENSE.txt).

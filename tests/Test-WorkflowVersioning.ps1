@@ -21,66 +21,73 @@ if (-not $match.Success) {
 }
 $versioningScript = $match.Groups['script'].Value
 $root = Join-Path ([System.IO.Path]::GetTempPath()) "CommonBuild-WorkflowVersioning-$([guid]::NewGuid().ToString('N'))"
-$artifacts = Join-Path $root 'artifacts'
-$versionFile = Join-Path (Join-Path $artifacts 'obj') 'gitversion.json'
-$outputFile = Join-Path $root 'github-output.txt'
-$previousOutput = $env:GITHUB_OUTPUT
+$env:ARTIFACTS_PATH = Join-Path $root 'artifacts'
+$env:VERSIONING_PROJECT_NAME = ''
+$env:VERSIONING_PACKAGE_ID = ''
+$env:RELEASE_VERSION = ''
+$env:GITHUB_OUTPUT = Join-Path $root 'output.txt'
+$env:GITHUB_STEP_SUMMARY = Join-Path $root 'summary.md'
+$versionFile = Join-Path $env:ARTIFACTS_PATH 'obj/gitversion.json'
 
 function Assert-WorkflowVersion {
-    param([hashtable] $VersionData, [string] $Label, [string] $Expected)
+    param([string] $SemVer, [string] $Channel, [string] $Ref, [string] $Expected, [string] $ErrorMessage)
 
-    $VersionData | ConvertTo-Json -Compress | Set-Content -LiteralPath $versionFile -Encoding utf8
-    if (Test-Path -LiteralPath $outputFile) {
-        Remove-Item -LiteralPath $outputFile
+    @{ SemVer = $SemVer; MajorMinorPatch = '9.9.9'; VersionSourceDistance = 999 } |
+        ConvertTo-Json -Compress | Set-Content -LiteralPath $versionFile -Encoding utf8
+    Set-Content -LiteralPath $env:GITHUB_OUTPUT -Value ''
+    $env:BAS_CB_BuildType = $Channel
+    $env:GITHUB_REF = $Ref
+
+    try {
+        & ([scriptblock]::Create($versioningScript))
+    }
+    catch {
+        if ($ErrorMessage -and $_.Exception.Message -like "*$ErrorMessage*") { return }
+        throw
     }
 
-    $script = $versioningScript.
-        Replace('${{ inputs.basBuildType }}', $Label).
-        Replace('${{ inputs.artifactsPath }}', $artifacts.Replace("'", "''")).
-        Replace('${{ inputs.versioningProjectName }}', '').
-        Replace('${{ inputs.basVersionMajor }}', '').
-        Replace('${{ inputs.basVersionMinor }}', '').
-        Replace('${{ inputs.basVersionBuild }}', '').
-        Replace('${{ inputs.basVersionRevision }}', '')
-    & ([scriptblock]::Create($script))
-
-    $actual = (Get-Content -LiteralPath $outputFile -Raw).Trim()
-    if ($actual -ne "version=$Expected") {
-        throw "Expected version=$Expected, got $actual."
+    if ($ErrorMessage) { throw "Expected workflow failure." }
+    $actual = Get-Content -LiteralPath $env:GITHUB_OUTPUT
+    if (@($actual -match '^sha=[0-9a-f]+$').Count -ne 1) { throw 'The output must include the checkout SHA.' }
+    $versionOutput = @($actual -match '^version=')
+    if (($Expected -and ($versionOutput -join '') -cne "version=$Expected") -or (!$Expected -and $versionOutput.Count -gt 0)) {
+        throw "Unexpected version output: $versionOutput"
     }
 }
 
 try {
     New-Item -ItemType Directory -Path (Split-Path $versionFile) -Force | Out-Null
-    $env:GITHUB_OUTPUT = $outputFile
+    Assert-WorkflowVersion '2.3.4-ci.feature.3-new.17' CI 'refs/heads/feature/3-new'
+    Assert-WorkflowVersion '2.3.4-preview.42' Preview 'refs/heads/main' '2.3.4-preview.42'
+    Assert-WorkflowVersion '2.3.4-rc.0' RC 'refs/heads/release/2.3' '2.3.4-rc.0'
+    Assert-WorkflowVersion '2.3.4' Release 'refs/heads/release/2.3' '2.3.4'
+    Assert-WorkflowVersion '2.4.0' Release 'refs/heads/release/2.3' -ErrorMessage 'does not belong to release line'
+    Assert-WorkflowVersion '2.3.4-ci.1' Release 'refs/heads/main' -ErrorMessage 'requires a stable version'
+    Assert-WorkflowVersion '2.3.4-CI00001' Preview 'refs/heads/main' -ErrorMessage 'requires a matching prerelease'
+    Assert-WorkflowVersion '' Release 'refs/heads/main' -ErrorMessage 'needs exactly one artifact version'
 
-    Assert-WorkflowVersion @{ MajorMinorPatch = '2.3.4'; VersionSourceDistance = 17 } 'CI' '2.3.4-CI00017'
-    # Backward compatibility with GitVersion versions that only emit CommitsSinceVersionSource.
-    Assert-WorkflowVersion @{ MajorMinorPatch = '2.3.4'; CommitsSinceVersionSource = 42 } 'Preview' '2.3.4-Preview00042'
-    Assert-WorkflowVersion @{ MajorMinorPatch = '2.3.4'; CommitsSinceVersionSource = 0 } 'CI' '2.3.4-CI00000'
-    Assert-WorkflowVersion @{ MajorMinorPatch = '2.3.4'; VersionSourceDistance = 0; CommitsSinceVersionSource = 42 } 'RC' '2.3.4-RC00000'
-    Assert-WorkflowVersion @{ MajorMinorPatch = '2.3.4' } 'Release' '2.3.4'
-
-    foreach ($invalidVersionData in @(
-        @{ MajorMinorPatch = '2.3.4' }
-        @{ MajorMinorPatch = '2.3.4'; VersionSourceDistance = 'invalid'; CommitsSinceVersionSource = 42 }
-    )) {
-        try {
-            Assert-WorkflowVersion $invalidVersionData 'CI' 'unused'
-            throw 'An invalid version increment should have failed.'
-        }
-        catch {
-            if ($_.Exception.Message -ne 'The version increment is missing or not numeric.') {
-                throw
-            }
-        }
-    }
+    $packagePath = Join-Path $env:ARTIFACTS_PATH 'package'
+    $manifestPath = Join-Path $root 'manifest'
+    New-Item -ItemType Directory -Path $packagePath, $manifestPath | Out-Null
+    '<package><metadata><id>Test</id><version>2.3.5</version></metadata></package>' |
+        Set-Content -LiteralPath (Join-Path $manifestPath 'Test.nuspec')
+    [IO.Compression.ZipFile]::CreateFromDirectory($manifestPath, (Join-Path $packagePath 'Test.2.3.5.nupkg'))
+    Assert-WorkflowVersion '9.9.9' Release 'refs/heads/release/2.3' '2.3.5'
+    '<package><metadata><id>Second</id><version>3.0.0</version></metadata></package>' |
+        Set-Content -LiteralPath (Join-Path $manifestPath 'Test.nuspec')
+    [IO.Compression.ZipFile]::CreateFromDirectory($manifestPath, (Join-Path $packagePath 'Second.3.0.0.nupkg'))
+    Assert-WorkflowVersion '9.9.9' Release 'refs/heads/main' -ErrorMessage 'needs exactly one artifact version'
+    $env:VERSIONING_PACKAGE_ID = 'Test'
+    Assert-WorkflowVersion '9.9.9' Release 'refs/heads/release/2.3' '2.3.5'
 
     Write-Host 'Workflow versioning tests passed.'
 }
 finally {
-    $env:GITHUB_OUTPUT = $previousOutput
     if (Test-Path -LiteralPath $root) {
-        Remove-Item -LiteralPath $root -Recurse -Force
+        $resolved = (Resolve-Path -LiteralPath $root).Path
+        $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        if ($resolved.StartsWith($temp, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $resolved -Recurse -Force
+        }
     }
 }
