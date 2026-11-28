@@ -696,14 +696,43 @@ jobs:
     - name: Create Git Tag
       if: steps.versioning.outputs.version != ''
       uses: actions/github-script@v9
+      env:
+        RELEASE_TAG: v${{ steps.versioning.outputs.version }}
+        BUILT_SHA: ${{ steps.versioning.outputs.sha }}
       with:
         script: |
-          github.rest.git.createRef({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            ref: 'refs/tags/v${{ steps.versioning.outputs.version }}',
-            sha: '${{ steps.versioning.outputs.sha }}'
-          })
+          const { owner, repo } = context.repo;
+          const { RELEASE_TAG: tag, BUILT_SHA: sha } = process.env;
+          const ref = `tags/${tag}`;
+
+          try {
+            await github.rest.git.createRef({ owner, repo, ref: `refs/${ref}`, sha });
+          } catch (error) {
+            if (error.status !== 409 && error.status !== 422) {
+              throw error;
+            }
+
+            let existing;
+            try {
+              existing = await github.rest.git.getRef({ owner, repo, ref });
+            } catch (lookupError) {
+              if (lookupError.status === 404) {
+                throw error;
+              }
+              throw lookupError;
+            }
+
+            let target = existing.data.object;
+            while (target.type === 'tag') {
+              const annotated = await github.rest.git.getTag({ owner, repo, tag_sha: target.sha });
+              target = annotated.data.object;
+            }
+
+            if (target.type !== 'commit' || target.sha !== sha) {
+              throw new Error(`Tag ${tag} points to ${target.type} ${target.sha}, expected commit ${sha}.`);
+            }
+            core.info(`Tag ${tag} already points to ${sha}.`);
+          }
 
   push_nuget:
     name: Push to ${{ matrix.feed }}

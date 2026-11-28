@@ -67,6 +67,8 @@ Preview, RC and stable releases run on `main`, `master` or
 `release/<major>.<minor>`. A stable release must match its release branch's line.
 These runs tag the verified build. Alpha and CI runs publish their configured
 artifacts without creating a Git tag.
+If the release tag already points to the built commit, the tag step succeeds.
+If it points elsewhere, publication stops.
 
 The release version comes from the built NuGet packages. Set
 `versioningPackageId` when packages have different versions. For a build without
