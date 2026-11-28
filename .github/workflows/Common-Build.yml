@@ -15,9 +15,8 @@
 name: NetCommonBuild
 
 permissions:
-  contents: write
-  packages: write
-  #id-token: write  # enable GitHub OIDC token issuance for this job
+  contents: read
+  packages: read
 
 on:
   workflow_call:
@@ -28,7 +27,7 @@ on:
         required: true
         type: string
       projectOrSolution:
-        description: 'The project or solution that will be built. The default builds all solutions in the "src" directory of the repository.'
+        description: 'The project or solution that will be built. The default selects a single .slnx file under src.'
         default: 'src/*.slnx'
         required: false
         type: string
@@ -95,48 +94,48 @@ on:
         description: 'Expected release version, or explicit version when neither a package nor GitVersion is available.'
         default: ''
         type: string
+    outputs:
+      sha:
+        description: 'Commit compiled by the build job.'
+        value: ${{ jobs.build.outputs.sha }}
+      releaseVersion:
+        description: 'Version selected for a Preview, RC or stable release.'
+        value: ${{ jobs.release_plan.outputs.version }}
+      nugetArtifactName:
+        description: 'Artifact containing the NuGet packages, when requested.'
+        value: ${{ inputs.runDotnetPack && format('NuGet Packages-{0}', jobs.build.outputs.id) || '' }}
+      publishArtifactName:
+        description: 'Artifact containing published binaries, when requested.'
+        value: ${{ inputs.runDotnetPublish && format('Artifacts-{0}', jobs.build.outputs.id) || '' }}
+
+env:
+  BAS_CB_BuildType: ${{ inputs.basBuildType }}
+  ARTIFACTS_PATH: ${{ inputs.artifactsPath }}
+  PROJECT_OR_SOLUTION: ${{ inputs.projectOrSolution }}
+  GitVersion_NoFetchEnabled: 'true'
+
 jobs:
   build:
-
+    name: Build
     runs-on: ${{ inputs.runsOn }}
-    env:
-      BAS_CB_BuildType: ${{ inputs.basBuildType }}
-      NUGET_PACKAGE_GLOB: ${{ inputs.artifactsPath }}/package/**/*.nupkg
-
+    outputs:
+      id: ${{ steps.plan.outputs.id }}
+      sha: ${{ steps.plan.outputs.sha }}
+      sdk: ${{ steps.plan.outputs.sdk }}
+      target: ${{ steps.plan.outputs.target }}
+      tasks: ${{ steps.plan.outputs.tasks }}
     steps:
     - name: Print Input Parameters
+      shell: pwsh
       env:
-        DOTNET_VERSION: ${{ inputs.dotNetVersion }}
-      run: |
-        echo basBuildType = ${{ inputs.basBuildType }}
-        echo projectOrSolution = ${{ inputs.projectOrSolution }}
-        echo artifactsPath = ${{ inputs.artifactsPath }}
-        echo "dotNetVersion = $DOTNET_VERSION"
-        echo publishTargetFramework = ${{ inputs.publishTargetFramework }}
-        echo runDotnetTest = ${{ inputs.runDotnetTest }}
-        echo runDotnetPublish = ${{ inputs.runDotnetPublish }}
-        echo runDotnetPack = ${{ inputs.runDotnetPack }}
-        echo runsOn = ${{ inputs.runsOn }}
-        echo sonarProjectKey = ${{ inputs.sonarProjectKey }}
-        echo sonarOrganization = ${{ inputs.sonarOrganization }}
-        echo versioningProjectName = ${{ inputs.versioningProjectName }}
-    - name: Validate Input Parameters
-      if: inputs.basBuildType != 'Alpha' && inputs.basBuildType != 'CI' && inputs.basBuildType != 'Preview' && inputs.basBuildType != 'RC' && inputs.basBuildType != 'Release'
-      run: |
-        echo 'Please check the basBuildType input. Supported values are ''Alpha'', ''CI'', ''Preview'', ''RC'' and ''Release''.'
-        exit 1
-
-    - name: Set up JDK for Sonar # necessary for Sonar
-      uses: actions/setup-java@v5
-      if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
-      with:
-        java-version: 21
-        distribution: 'zulu' # Alternative distribution options are available.
+        WORKFLOW_INPUTS: ${{ toJSON(inputs) }}
+      run: Write-Host $env:WORKFLOW_INPUTS
 
     - name: Checkout Repository
       uses: actions/checkout@v6
       with:
         fetch-depth: 0 # Shallow clones should be disabled for versioning and a better relevancy of sonar analysis
+        persist-credentials: false
 
     - name: Validate release ref
       if: inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview'
@@ -153,17 +152,74 @@ jobs:
             }
         }
 
-    - name: Setup .NET
+    - &setup_dotnet
+      name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
         dotnet-version: ${{ inputs.dotNetVersion }}
         dotnet-quality: 'ga'
 
+    - name: Plan build
+      id: plan
+      shell: pwsh
+      env:
+        RUN_TEST: ${{ inputs.runDotnetTest }}
+        RUN_PACK: ${{ inputs.runDotnetPack }}
+        RUN_PUBLISH: ${{ inputs.runDotnetPublish }}
+        SONAR_ENABLED: ${{ inputs.sonarProjectKey != '' && inputs.sonarOrganization != '' }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        if ($env:BAS_CB_BuildType -notin 'alpha', 'ci', 'preview', 'rc', 'release') {
+            throw 'basBuildType must be alpha, ci, preview, rc or release.'
+        }
+
+        $workspace = $env:GITHUB_WORKSPACE
+        $targets = @(
+            if (Test-Path -LiteralPath $env:PROJECT_OR_SOLUTION -PathType Leaf) {
+                Get-Item -LiteralPath $env:PROJECT_OR_SOLUTION
+            }
+            else {
+                Get-ChildItem -Path $env:PROJECT_OR_SOLUTION -File
+            }
+        )
+        if ($targets.Count -ne 1) { throw 'projectOrSolution must select exactly one solution or project.' }
+        $target = [IO.Path]::GetRelativePath($workspace, $targets[0].FullName).Replace('\', '/')
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $workspace)
+        $relativeRoot = [IO.Path]::GetRelativePath($workspace, $artifactRoot).Replace('\', '/')
+        if ($target -match '(^|/)\.\.?(/|$)|[\r\n]' -or [IO.Path]::IsPathRooted($target) -or
+            [IO.Path]::IsPathRooted($env:ARTIFACTS_PATH) -or $relativeRoot -match '(^|/)(\.{1,2}|\.git)(/|$)|[\r\n]' -or [IO.Path]::IsPathRooted($relativeRoot)) {
+            throw 'The build target and artifactsPath must be inside the checkout. Use a dedicated artifacts directory.'
+        }
+
+        $tasks = @(
+            if ($env:RUN_TEST -eq 'true' -and $env:SONAR_ENABLED -ne 'true') { 'test' }
+            if ($env:RUN_PACK -eq 'true') { 'pack' }
+            if ($env:RUN_PUBLISH -eq 'true') { 'publish' }
+        )
+        $id = [Guid]::NewGuid().ToString('N').Substring(0, 12)
+        $sha = git rev-parse HEAD
+        $sdk = dotnet --version
+        "id=$id" >> $env:GITHUB_OUTPUT
+        "sha=$sha" >> $env:GITHUB_OUTPUT
+        "sdk=$sdk" >> $env:GITHUB_OUTPUT
+        "target=$target" >> $env:GITHUB_OUTPUT
+        "tasks=$(ConvertTo-Json -InputObject $tasks -Compress)" >> $env:GITHUB_OUTPUT
+        "Commit: $sha" >> $env:GITHUB_STEP_SUMMARY
+        "SDK: $sdk" >> $env:GITHUB_STEP_SUMMARY
+
+    - name: Set up JDK for Sonar # necessary for Sonar
+      uses: actions/setup-java@v5
+      if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
+      with:
+        java-version: 21
+        distribution: 'zulu' # Alternative distribution options are available.
+
     - name: Cache SonarCloud packages
       uses: actions/cache@v5
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       with:
-        path: ~\sonar\cache
+        path: ~/.sonar/cache
         key: ${{ runner.os }}-sonar
         restore-keys: ${{ runner.os }}-sonar
 
@@ -172,160 +228,345 @@ jobs:
       uses: actions/cache@v5
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
       with:
-        path: .\.sonar\scanner
+        path: .sonar/scanner
         key: ${{ runner.os }}-sonar-scanner
         restore-keys: ${{ runner.os }}-sonar-scanner
 
     - name: Install SonarCloud scanner
       if: steps.cache-sonar-scanner.outputs.cache-hit != 'true' && inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
+      shell: pwsh
       run: |
-        mkdir -p .sonar/scanner
         dotnet tool update dotnet-sonarscanner --tool-path .sonar/scanner
+        exit $LASTEXITCODE
 
-    - name: Dotnet Restore
-      run: dotnet restore ${{ inputs.projectOrSolution }}
+    - name: Dotnet Restore and lock dependencies
+      shell: pwsh
+      env:
+        BUILD_TARGET: ${{ steps.plan.outputs.target }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $env:GITHUB_WORKSPACE)
+        dotnet restore $env:BUILD_TARGET --use-lock-file -p:Configuration=Release -p:UseArtifactsOutput=true "-p:ArtifactsPath=$artifactRoot"
+        # Generate missing locks while enforcing any locks committed by the caller.
+        git diff --exit-code -- ':(glob)**/packages.lock.json' ':(glob)**/packages.*.lock.json'
 
     - name: Warm up GitVersion serially
       if: runner.os == 'Linux'
+      shell: pwsh
       env:
-        PROJECT_OR_SOLUTION: ${{ inputs.projectOrSolution }}
+        BUILD_TARGET: ${{ steps.plan.outputs.target }}
         VERSIONING_PROJECT_NAME: ${{ inputs.versioningProjectName }}
       run: |
-        set -euo pipefail
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        $projects = @($env:BUILD_TARGET)
+        if ([IO.Path]::GetExtension($env:BUILD_TARGET) -in '.sln', '.slnx') {
+            $solutionDirectory = Split-Path -Parent (Join-Path $env:GITHUB_WORKSPACE $env:BUILD_TARGET)
+            $projects = @(dotnet sln $env:BUILD_TARGET list | ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -match '\.(cs|fs|vb)proj$' } |
+                ForEach-Object { Join-Path $solutionDirectory $_ })
+        }
+        if ($env:VERSIONING_PROJECT_NAME) {
+            $projects = @($projects | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_) -ceq $env:VERSIONING_PROJECT_NAME })
+            if ($projects.Count -ne 1) { throw 'versioningProjectName must select exactly one project.' }
+        }
 
-        if [[ -f "$PROJECT_OR_SOLUTION" ]]; then
-          target="$PROJECT_OR_SOLUTION"
-        else
-          if ! matches="$(compgen -G "$PROJECT_OR_SOLUTION" | sort)"; then
-            echo "No project or solution matches '$PROJECT_OR_SOLUTION'." >&2
-            exit 1
-          fi
-          mapfile -t targets <<< "$matches"
-          target="${targets[0]}"
-        fi
-
-        if [[ "$target" == *.csproj ]]; then
-          project="$target"
-        else
-          if ! listing="$(dotnet sln "$target" list)"; then
-            printf '%s\n' "$listing" >&2
-            exit 1
-          fi
-          projects=()
-          while IFS= read -r candidate; do
-            candidate="${candidate%$'\r'}"
-            candidate="${candidate//\\//}"
-            if [[ "$candidate" == *.csproj ]]; then
-              projects+=("$candidate")
-            fi
-          done <<< "$listing"
-
-          if [[ -n "$VERSIONING_PROJECT_NAME" ]]; then
-            if ((${#projects[@]})); then
-              for candidate in "${projects[@]}"; do
-                if [[ "$(basename "$candidate" .csproj)" == "$VERSIONING_PROJECT_NAME" ]]; then
-                  project="$candidate"
-                  break
-                fi
-              done
-            fi
-            if [[ -z "${project:-}" ]]; then
-              echo "Could not find versioning project '$VERSIONING_PROJECT_NAME' in '$PROJECT_OR_SOLUTION'." >&2
-              exit 1
-            fi
-          else
-            project="${projects[0]:-}"
-          fi
-
-          # dotnet sln list returns paths relative to the solution, not the working directory.
-          if [[ -n "${project:-}" && "$project" != /* ]]; then
-            project="$(dirname "$target")/$project"
-          fi
-        fi
-
-        if [[ -z "${project:-}" ]]; then
-          echo "Could not find a C# project in '$PROJECT_OR_SOLUTION' to warm up GitVersion." >&2
-          exit 1
-        fi
-
-        echo "Reading target frameworks from '$project'."
-        if ! properties="$(dotnet msbuild "$project" -property:Configuration=Release -getProperty:TargetFramework,TargetFrameworks,DisableGitVersionTask,GitVersion_ToolArgments)"; then
-          printf '%s\n' "$properties" >&2
-          exit 1
-        fi
-        if [[ "$(jq -r '.Properties.DisableGitVersionTask // ""' <<< "$properties")" != false || -z "$(jq -r '.Properties.GitVersion_ToolArgments // ""' <<< "$properties")" ]]; then
-          echo "GitVersion is not active for '$project'."
-          exit 0
-        fi
-
-        target_framework="$(jq -r '(.Properties.TargetFramework // "") as $framework | if $framework != "" then $framework else (.Properties.TargetFrameworks // "") end' <<< "$properties")"
-        target_framework="${target_framework%%;*}"
-
-        if [[ -z "$target_framework" ]]; then
-          echo "Could not determine a target framework for '$project'." >&2
-          exit 1
-        fi
-
-        echo "Warming up GitVersion with '$project' for '$target_framework'."
-        dotnet msbuild "$project" \
-          -target:GetVersion \
-          -property:TargetFramework="$target_framework" \
-          -property:Configuration=Release \
-          -maxcpucount:1 \
-          -nodeReuse:false
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $env:GITHUB_WORKSPACE)
+        $properties = @('-p:Configuration=Release', '-p:UseArtifactsOutput=true', "-p:ArtifactsPath=$artifactRoot")
+        foreach ($project in $projects) {
+            $result = dotnet msbuild $project @properties -nologo -v:q '-getProperty:TargetFramework,TargetFrameworks,DisableGitVersionTask,GitVersion_ToolArgments'
+            $settings = ($result | ConvertFrom-Json).Properties
+            if ($settings.DisableGitVersionTask -ne 'false' -or !$settings.GitVersion_ToolArgments) { continue }
+            $framework = $settings.TargetFramework
+            if (!$framework) { $framework = ($settings.TargetFrameworks -split ';')[0] }
+            if (!$framework) { throw "GitVersion project '$project' did not specify a target framework." }
+            dotnet msbuild $project @properties -target:GetVersion "-property:TargetFramework=$framework" -maxcpucount:1 -nodeReuse:false
+            return
+        }
+        Write-Host 'No selected project has GitVersion enabled.'
 
     - name: Start Sonar Analysis
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
+      shell: pwsh
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to get PR information, if any
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_KEY: ${{ inputs.sonarProjectKey }}
+        SONAR_ORGANIZATION: ${{ inputs.sonarOrganization }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_HEAD: ${{ github.head_ref }}
+        PR_BASE: ${{ github.base_ref }}
       run: |
-        if [ "${{ github.event_name }}" == "pull_request" ]; then
-          PR_PARAMS="/d:sonar.pullrequest.key=${{ github.event.pull_request.number }} /d:sonar.pullrequest.branch=${{ github.head_ref }} /d:sonar.pullrequest.base=${{ github.base_ref }} /d:sonar.github.repository=${{ github.repository }} /d:sonar.github.oauth=${{ secrets.GITHUB_TOKEN }}"
-        else
-          PR_PARAMS=""
-        fi
-
-        .sonar/scanner/dotnet-sonarscanner begin /k:"${{ inputs.sonarProjectKey }}" /o:"${{ inputs.sonarOrganization }}" /d:sonar.token="${{ secrets.SONAR_TOKEN }}" /d:sonar.host.url="https://sonarcloud.io" /d:sonar.cs.opencover.reportsPaths="**/TestResults/**/*opencover.xml" $PR_PARAMS
+        $scannerArgs = @('begin', "/k:$env:SONAR_KEY", "/o:$env:SONAR_ORGANIZATION", "/d:sonar.token=$env:SONAR_TOKEN", '/d:sonar.host.url=https://sonarcloud.io', '/d:sonar.cs.opencover.reportsPaths=**/TestResults/**/*opencover.xml')
+        if ($env:PR_NUMBER) {
+            $scannerArgs += "/d:sonar.pullrequest.key=$env:PR_NUMBER", "/d:sonar.pullrequest.branch=$env:PR_HEAD", "/d:sonar.pullrequest.base=$env:PR_BASE"
+        }
+        & ./.sonar/scanner/dotnet-sonarscanner @scannerArgs
+        exit $LASTEXITCODE
 
     - name: Dotnet Build
-      run: dotnet build ${{ inputs.projectOrSolution }} -c Release --no-restore
-
-    - name: Dotnet Test
-      if: inputs.runDotnetTest
+      shell: pwsh
+      env:
+        BUILD_TARGET: ${{ steps.plan.outputs.target }}
       run: |
-        TARGET=$(ls ${{ inputs.projectOrSolution }} 2>/dev/null | head -n 1)
-        if [[ "$TARGET" == *.sln || "$TARGET" == *.slnx ]]; then
-          dotnet test --solution "$TARGET" -c Release --no-build --verbosity normal --coverage
-        elif [[ "$TARGET" == *.csproj ]]; then
-          dotnet test --project "$TARGET" -c Release --no-build --verbosity normal --coverage
-        else
-          dotnet test "$TARGET" -c Release --no-build --verbosity normal --coverage
-        fi
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $env:GITHUB_WORKSPACE)
+        dotnet build $env:BUILD_TARGET -c Release --no-restore -p:UseArtifactsOutput=true "-p:ArtifactsPath=$artifactRoot"
+        exit $LASTEXITCODE
+
+    - name: Dotnet Test for Sonar coverage
+      if: inputs.runDotnetTest && inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
+      shell: pwsh
+      env:
+        BUILD_TARGET: ${{ steps.plan.outputs.target }}
+      run: |
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $env:GITHUB_WORKSPACE)
+        $selector = if ([IO.Path]::GetExtension($env:BUILD_TARGET) -in '.sln', '.slnx') { '--solution' } else { '--project' }
+        dotnet test $selector $env:BUILD_TARGET -c Release --no-build --verbosity normal --coverage -p:UseArtifactsOutput=true "-p:ArtifactsPath=$artifactRoot"
+        exit $LASTEXITCODE
 
     - name: End Sonar Analysis
       if: inputs.sonarProjectKey != '' && inputs.sonarOrganization != ''
+      shell: pwsh
       env:
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       run: |
-        .sonar/scanner/dotnet-sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
+        & ./.sonar/scanner/dotnet-sonarscanner end "/d:sonar.token=$env:SONAR_TOKEN"
+        exit $LASTEXITCODE
 
-    - name: Dotnet Publish
-      if: inputs.runDotnetPublish
-      run: dotnet publish ${{ inputs.projectOrSolution }} -c Release --no-build ${{ inputs.publishTargetFramework != '' && format('-f {0}', inputs.publishTargetFramework) || '' }}
+    - name: Archive build state
+      id: state
+      if: steps.plan.outputs.tasks != '[]' || inputs.verificationScript != '' || inputs.basBuildType == 'Preview' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Release'
+      shell: pwsh
+      env:
+        TRANSFER_PATH: ${{ runner.temp }}/commonbuild-${{ steps.plan.outputs.id }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        New-Item -ItemType Directory -Path $env:TRANSFER_PATH -Force | Out-Null
+        git for-each-ref '--format=%(refname) %(objectname) %(symref)' refs/heads refs/remotes refs/tags |
+            Where-Object { ($_ -split ' ', 3)[2] -eq '' } |
+            Set-Content -LiteralPath (Join-Path $env:TRANSFER_PATH 'refs.txt')
+        $PSNativeCommandUseErrorActionPreference = $false
+        $head = git symbolic-ref --quiet HEAD
+        if ($LASTEXITCODE -gt 1) { throw 'Could not read the checkout branch.' }
+        $PSNativeCommandUseErrorActionPreference = $true
+        [string]$head | Set-Content -LiteralPath (Join-Path $env:TRANSFER_PATH 'head.txt')
 
-    - name: Attach Build Artifacts to Workflow Run
-      if: inputs.runDotnetPublish
+        $workspace = $env:GITHUB_WORKSPACE
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $workspace)
+        $entries = @(
+            foreach ($name in 'bin', 'obj') {
+                $directory = Join-Path $artifactRoot $name
+                if (Test-Path -LiteralPath $directory -PathType Container) {
+                    [IO.Path]::GetRelativePath($workspace, $directory).Replace('\', '/')
+                }
+            }
+            Get-ChildItem -LiteralPath $workspace -Recurse -File -Include 'packages.lock.json','packages.*.lock.json' |
+                Where-Object { !$_.FullName.StartsWith($artifactRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::Ordinal) } |
+                ForEach-Object { [IO.Path]::GetRelativePath($workspace, $_.FullName).Replace('\', '/') }
+        )
+        if (!$entries) { throw 'The build produced no files to transfer.' }
+        if ($entries -match '[\r\n]') { throw 'Build artifact paths must fit on one line.' }
+        $fileList = Join-Path $env:TRANSFER_PATH 'archive-files.txt'
+        $entries | ForEach-Object { "./$_" } | Set-Content -LiteralPath $fileList
+        tar -cf (Join-Path $env:TRANSFER_PATH 'build.tar') -T $fileList
+
+    - name: Upload build state
+      if: steps.state.outcome == 'success'
       uses: actions/upload-artifact@v7
       with:
-        name: Artifacts
-        path: ${{ inputs.artifactsPath }}/publish/**
+        name: Build state-${{ steps.plan.outputs.id }}
+        path: |
+          ${{ runner.temp }}/commonbuild-${{ steps.plan.outputs.id }}/build.tar
+          ${{ runner.temp }}/commonbuild-${{ steps.plan.outputs.id }}/refs.txt
+          ${{ runner.temp }}/commonbuild-${{ steps.plan.outputs.id }}/head.txt
         if-no-files-found: error
+        compression-level: 1
         retention-days: 10
 
-    - name: Dotnet Pack
+  post_build:
+    name: ${{ matrix.task }}
+    needs: build
+    if: needs.build.outputs.tasks != '[]'
+    runs-on: ${{ inputs.runsOn }}
+    strategy:
+      fail-fast: false
+      matrix:
+        task: ${{ fromJSON(needs.build.outputs.tasks || '[]') }}
+    steps:
+    - &checkout_built_commit
+      name: Checkout built commit
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ needs.build.outputs.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+
+    - *setup_dotnet
+
+    - &download_build_state
+      name: Download build state
+      uses: actions/download-artifact@v8
+      with:
+        name: Build state-${{ needs.build.outputs.id }}
+        path: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+
+    - &unpack_build_state
+      name: Unpack build state
+      shell: pwsh
+      env:
+        TRANSFER_PATH: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        tar -xf (Join-Path $env:TRANSFER_PATH 'build.tar')
+
+    - &restore_build_environment
+      name: Reuse Git context and locked dependencies
+      shell: pwsh
+      env:
+        BUILT_SHA: ${{ needs.build.outputs.sha }}
+        BUILD_SDK: ${{ needs.build.outputs.sdk }}
+        BUILD_TARGET: ${{ needs.build.outputs.target }}
+        TRANSFER_PATH: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        $sdk = dotnet --version
+        if ($sdk -cne $env:BUILD_SDK) {
+            throw "The Build job used SDK '$env:BUILD_SDK'. This runner selected '$sdk'. Pin the SDK for all jobs."
+        }
+
+        # Pin the branches and tags that GitVersion could see during compilation.
+        $snapshot = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+        foreach ($line in Get-Content -LiteralPath (Join-Path $env:TRANSFER_PATH 'refs.txt')) {
+            $refName, $objectId = $line -split ' ', 2
+            $snapshot.Add($refName, $objectId.Trim())
+        }
+        $transaction = @(
+            'start'
+            git for-each-ref '--format=%(refname) %(symref)' refs/heads refs/remotes refs/tags | ForEach-Object {
+                $refName, $symbolicRef = $_ -split ' ', 2
+                if (!$symbolicRef -and !$snapshot.ContainsKey($refName)) { "delete $refName" }
+            }
+            foreach ($refName in $snapshot.Keys) { "update $refName $($snapshot[$refName])" }
+            'prepare'
+            'commit'
+        )
+        # Git's stdin protocol requires LF, including on Windows.
+        $git = [Diagnostics.ProcessStartInfo]::new('git', 'update-ref --stdin')
+        $git.WorkingDirectory = $env:GITHUB_WORKSPACE
+        $git.RedirectStandardInput = $true
+        $git.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+        $git.UseShellExecute = $false
+        $process = [Diagnostics.Process]::Start($git)
+        try {
+            $process.StandardInput.NewLine = [string][char]10
+            foreach ($command in $transaction) { $process.StandardInput.WriteLine($command) }
+            $process.StandardInput.Close()
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) { throw 'Could not restore the Git refs from Build.' }
+        }
+        finally { $process.Dispose() }
+        $head = ([string](Get-Content -LiteralPath (Join-Path $env:TRANSFER_PATH 'head.txt') -Raw)).Trim()
+        if ($head) { git symbolic-ref HEAD $head }
+        $sha = git rev-parse HEAD
+        if ($sha -cne $env:BUILT_SHA) { throw "Expected checkout '$env:BUILT_SHA', got '$sha'." }
+
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $env:GITHUB_WORKSPACE)
+        dotnet restore $env:BUILD_TARGET --locked-mode --force -p:Configuration=Release -p:UseArtifactsOutput=true "-p:ArtifactsPath=$artifactRoot"
+
+    - name: Run ${{ matrix.task }}
+      shell: pwsh
+      env:
+        BUILD_TARGET: ${{ needs.build.outputs.target }}
+        TASK: ${{ matrix.task }}
+        PUBLISH_FRAMEWORK: ${{ inputs.publishTargetFramework }}
+      run: |
+        $artifactRoot = [IO.Path]::GetFullPath($env:ARTIFACTS_PATH, $env:GITHUB_WORKSPACE)
+        $commonArgs = @('-c', 'Release', '--no-build', '-p:UseArtifactsOutput=true', "-p:ArtifactsPath=$artifactRoot")
+        switch ($env:TASK) {
+            'test' {
+                $selector = if ([IO.Path]::GetExtension($env:BUILD_TARGET) -in '.sln', '.slnx') { '--solution' } else { '--project' }
+                dotnet test $selector $env:BUILD_TARGET @commonArgs --verbosity normal --coverage
+            }
+            'pack' { dotnet pack $env:BUILD_TARGET @commonArgs }
+            'publish' {
+                $frameworkArgs = @()
+                if ($env:PUBLISH_FRAMEWORK) { $frameworkArgs = @('-f', $env:PUBLISH_FRAMEWORK) }
+                dotnet publish $env:BUILD_TARGET @commonArgs @frameworkArgs
+            }
+            default { throw "Unknown build task '$env:TASK'." }
+        }
+        exit $LASTEXITCODE
+
+    - name: Attach NuGet Artifacts to Workflow Run
+      if: matrix.task == 'pack'
+      uses: actions/upload-artifact@v7
+      with:
+        name: NuGet Packages-${{ needs.build.outputs.id }}
+        path: ${{ inputs.artifactsPath }}/package/**/*.nupkg
+        if-no-files-found: error
+        overwrite: true
+        retention-days: 10
+
+    - name: Archive published binaries
+      if: matrix.task == 'publish'
+      shell: pwsh
+      env:
+        TRANSFER_PATH: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        tar -cf (Join-Path $env:TRANSFER_PATH 'publish.tar') -- (Join-Path $env:ARTIFACTS_PATH 'publish')
+
+    - name: Attach published binaries to Workflow Run
+      if: matrix.task == 'publish'
+      uses: actions/upload-artifact@v7
+      with:
+        name: Artifacts-${{ needs.build.outputs.id }}
+        path: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}/publish.tar
+        if-no-files-found: error
+        overwrite: true
+        retention-days: 10
+
+  verify:
+    name: Repository verification
+    needs: [build, post_build]
+    if: |
+      !cancelled() && inputs.verificationScript != '' && needs.build.result == 'success' &&
+      (needs.post_build.result == 'success' || needs.post_build.result == 'skipped')
+    runs-on: ${{ inputs.runsOn }}
+    steps:
+    - *checkout_built_commit
+    - *setup_dotnet
+    - *download_build_state
+    - *unpack_build_state
+    - *restore_build_environment
+
+    - &download_nuget
+      name: Download NuGet packages
       if: inputs.runDotnetPack
-      run: dotnet pack ${{ inputs.projectOrSolution }} -c Release --no-build
+      uses: actions/download-artifact@v8
+      with:
+        name: NuGet Packages-${{ needs.build.outputs.id }}
+        path: ${{ inputs.artifactsPath }}/package
+
+    - name: Download published binaries
+      if: inputs.runDotnetPublish
+      uses: actions/download-artifact@v8
+      with:
+        name: Artifacts-${{ needs.build.outputs.id }}
+        path: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+
+    - name: Unpack published binaries
+      if: inputs.runDotnetPublish
+      shell: pwsh
+      env:
+        TRANSFER_PATH: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+      run: |
+        tar -xf (Join-Path $env:TRANSFER_PATH 'publish.tar')
+        exit $LASTEXITCODE
 
     - name: Run Repository Verification
       if: inputs.verificationScript != ''
@@ -341,14 +582,37 @@ jobs:
         & (Join-Path $env:GITHUB_WORKSPACE $env:VERIFICATION_SCRIPT)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    - name: Attach NuGet Artifacts to Workflow Run
-      if: inputs.runDotnetPack
-      uses: actions/upload-artifact@v7
+  release_plan:
+    name: Resolve version and tag release
+    needs: [build, post_build, verify]
+    if: |
+      !cancelled() && (inputs.basBuildType == 'Preview' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Release') &&
+      needs.build.result == 'success' &&
+      (needs.post_build.result == 'success' || needs.post_build.result == 'skipped') &&
+      (needs.verify.result == 'success' || needs.verify.result == 'skipped')
+    runs-on: ${{ inputs.runsOn }}
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.versioning.outputs.version }}
+    steps:
+    - *download_nuget
+
+    - name: Download build state for a release without NuGet packages
+      if: '!inputs.runDotnetPack'
+      uses: actions/download-artifact@v8
       with:
-        name: NuGet Packages
-        path: ${{ env.NUGET_PACKAGE_GLOB }}
-        if-no-files-found: error
-        retention-days: 10
+        name: Build state-${{ needs.build.outputs.id }}
+        path: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+
+    - name: Read build outputs
+      if: '!inputs.runDotnetPack'
+      shell: pwsh
+      env:
+        TRANSFER_PATH: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}
+      run: |
+        tar -xf (Join-Path $env:TRANSFER_PATH 'build.tar')
+        exit $LASTEXITCODE
 
     - name: Versioning
       id: versioning
@@ -357,11 +621,15 @@ jobs:
         ARTIFACTS_PATH: ${{ inputs.artifactsPath }}
         VERSIONING_PROJECT_NAME: ${{ inputs.versioningProjectName }}
         VERSIONING_PACKAGE_ID: ${{ inputs.versioningPackageId }}
+        BUILT_SHA: ${{ needs.build.outputs.sha }}
         RELEASE_VERSION: ${{ inputs.releaseVersion }}
       run: |
         $ErrorActionPreference = 'Stop'
-        $sha = git rev-parse HEAD
-        if ($LASTEXITCODE -ne 0) { throw 'Could not determine the checked-out commit.' }
+        $sha = $env:BUILT_SHA
+        if (!$sha) {
+            $sha = git rev-parse HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Could not determine the checked-out commit.' }
+        }
         "sha=$sha" >> $env:GITHUB_OUTPUT
         "Commit: $sha" >> $env:GITHUB_STEP_SUMMARY
 
@@ -437,34 +705,60 @@ jobs:
             sha: '${{ steps.versioning.outputs.sha }}'
           })
 
+  push_nuget:
+    name: Push to ${{ matrix.feed }}
+    needs: [build, post_build, verify, release_plan]
+    if: |
+      !cancelled() && inputs.runDotnetPack && needs.build.result == 'success' &&
+      needs.post_build.result == 'success' &&
+      (needs.verify.result == 'success' || needs.verify.result == 'skipped') &&
+      (needs.release_plan.result == 'success' ||
+       (needs.release_plan.result == 'skipped' && (inputs.basBuildType == 'Alpha' || inputs.basBuildType == 'CI')))
+    runs-on: ${{ inputs.runsOn }}
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        feed: ${{ fromJSON((inputs.basBuildType == 'Alpha' || inputs.basBuildType == 'CI') && '["GitHub Packages"]' || '["GitHub Packages","NuGet.org"]') }}
+    steps:
+    - *setup_dotnet
+    - *download_nuget
+
+    - name: Push verified packages
+      shell: pwsh
+      env:
+        FEED: ${{ matrix.feed }}
+        GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+        GITHUB_TOKEN: ${{ matrix.feed == 'GitHub Packages' && secrets.GITHUB_TOKEN || '' }}
+        NUGET_API_KEY: ${{ matrix.feed == 'NuGet.org' && secrets.NUGET_API_KEY || '' }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        $destination = if ($env:FEED -eq 'NuGet.org') { 'https://api.nuget.org/v3/index.json' } else { $env:GITHUB_PACKAGES_SOURCE }
+        $token = if ($env:FEED -eq 'NuGet.org') { $env:NUGET_API_KEY } else { $env:GITHUB_TOKEN }
+        $packages = @(Get-ChildItem -LiteralPath (Join-Path $env:ARTIFACTS_PATH 'package') -Recurse -Filter '*.nupkg' -File)
+        if ($packages.Count -eq 0) { throw 'No verified NuGet packages to push.' }
+        foreach ($package in $packages) {
+            dotnet nuget push $package.FullName --api-key $token --source $destination
+        }
+
+  github_release:
+    name: Create GitHub Release
+    needs: [build, release_plan, push_nuget]
+    if: |
+      !cancelled() && needs.release_plan.result == 'success' &&
+      (needs.push_nuget.result == 'success' || (!inputs.runDotnetPack && needs.push_nuget.result == 'skipped'))
+    runs-on: ${{ inputs.runsOn }}
+    permissions:
+      contents: write
+    steps:
+    - *download_nuget
+
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v3
-      if: inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview'
       with:
-        files: ${{ env.NUGET_PACKAGE_GLOB }}
+        files: ${{ inputs.artifactsPath }}/package/**/*.nupkg
         fail_on_unmatched_files: false
-        tag_name: v${{ steps.versioning.outputs.version }}
+        tag_name: v${{ needs.release_plan.outputs.version }}
         prerelease: ${{ inputs.basBuildType != 'Release' }}
-
-    # - name: NuGet login (OIDC → temp API key) # Get a short-lived NuGet API key
-    #   if: inputs.runDotnetPack && (inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview')
-    #   uses: NuGet/login@v1
-    #   id: nugetlogin
-    #   with:
-    #     user: ${{ secrets.NUGET_USER }} # nuget.org username (profile name), NOT your email address
-
-    - name: Dotnet NuGet Push NuGet.org
-      if: inputs.runDotnetPack && (inputs.basBuildType == 'Release' || inputs.basBuildType == 'RC' || inputs.basBuildType == 'Preview')
-      shell: pwsh
-      env:
-        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-      # For OIDC, set NUGET_API_KEY from steps.nugetlogin.outputs.NUGET_API_KEY.
-      run: dotnet nuget push "$env:NUGET_PACKAGE_GLOB" --api-key "$env:NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
-
-    - name: Dotnet NuGet Push GitHub
-      if: inputs.runDotnetPack
-      shell: pwsh
-      env:
-        GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: dotnet nuget push "$env:NUGET_PACKAGE_GLOB" --source "$env:GITHUB_PACKAGES_SOURCE" --api-key "$env:GITHUB_TOKEN"
