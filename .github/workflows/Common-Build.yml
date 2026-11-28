@@ -297,7 +297,13 @@ jobs:
         PR_HEAD: ${{ github.head_ref }}
         PR_BASE: ${{ github.base_ref }}
       run: |
-        $scannerArgs = @('begin', "/k:$env:SONAR_KEY", "/o:$env:SONAR_ORGANIZATION", "/d:sonar.token=$env:SONAR_TOKEN", '/d:sonar.host.url=https://sonarcloud.io', '/d:sonar.cs.opencover.reportsPaths=**/TestResults/**/*opencover.xml')
+        $scannerArgs = @('begin', "/k:$env:SONAR_KEY", "/o:$env:SONAR_ORGANIZATION", "/d:sonar.token=$env:SONAR_TOKEN", '/d:sonar.host.url=https://sonarcloud.io')
+        $settingsPath = Join-Path $env:GITHUB_WORKSPACE 'SonarQube.Analysis.xml'
+        if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+            $scannerArgs += "/s:$settingsPath"
+        } else {
+            $scannerArgs += '/d:sonar.cs.opencover.reportsPaths=**/TestResults/**/*opencover.xml'
+        }
         if ($env:PR_NUMBER) {
             $scannerArgs += "/d:sonar.pullrequest.key=$env:PR_NUMBER", "/d:sonar.pullrequest.branch=$env:PR_HEAD", "/d:sonar.pullrequest.base=$env:PR_BASE"
         }
@@ -569,18 +575,60 @@ jobs:
         exit $LASTEXITCODE
 
     - name: Run Repository Verification
+      id: verify_repository
       if: inputs.verificationScript != ''
       shell: pwsh
       env:
         VERIFICATION_SCRIPT: ${{ inputs.verificationScript }}
         BAS_CB_BUILD_TYPE: ${{ inputs.basBuildType }}
         BAS_CB_ARTIFACTS_PATH: ${{ inputs.artifactsPath }}
+        BAS_CB_TEST_RESULTS_PATH: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}-test-results
       run: |
         $ErrorActionPreference = 'Stop'
         $PSNativeCommandUseErrorActionPreference = $true
         $global:LASTEXITCODE = 0
         & (Join-Path $env:GITHUB_WORKSPACE $env:VERIFICATION_SCRIPT)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Upload verification test reports
+      id: upload_test_reports
+      if: ${{ !cancelled() && (steps.verify_repository.outcome == 'success' || steps.verify_repository.outcome == 'failure') }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: Verification Test Reports-${{ needs.build.outputs.id }}
+        path: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}-test-results/**/*.trx
+        if-no-files-found: ignore
+        retention-days: 10
+
+    - name: Summarize verification tests
+      if: ${{ !cancelled() && steps.upload_test_reports.outputs.artifact-id != '' }}
+      shell: pwsh
+      env:
+        TEST_RESULTS_PATH: ${{ runner.temp }}/commonbuild-${{ needs.build.outputs.id }}-test-results
+        TEST_REPORTS_URL: ${{ steps.upload_test_reports.outputs.artifact-url }}
+      run: |
+        # Microsoft.Testing.Platform also writes a consolidated copy under merged.
+        $mergedReports = Join-Path $env:TEST_RESULTS_PATH 'merged'
+        $reports = Get-ChildItem -LiteralPath $env:TEST_RESULTS_PATH -Filter '*.trx' -File -Recurse |
+            Where-Object { $_.DirectoryName -ne $mergedReports }
+        $counts = @{ total = 0; passed = 0; failed = 0; notExecuted = 0 }
+        foreach ($report in $reports) {
+            [xml]$trx = Get-Content -LiteralPath $report.FullName -Raw
+            $counters = $trx.TestRun.ResultSummary.Counters
+            foreach ($name in @('total', 'passed', 'failed', 'notExecuted')) {
+                $counts[$name] += [int]$counters.$name
+            }
+        }
+        $other = $counts.total - $counts.passed - $counts.failed - $counts.notExecuted
+        @(
+            '### Repository verification tests'
+            ''
+            '| Total | Passed | Failed | Not run | Other |'
+            '| ---: | ---: | ---: | ---: | ---: |'
+            "| $($counts.total) | $($counts.passed) | $($counts.failed) | $($counts.notExecuted) | $other |"
+            ''
+            "[Download TRX reports]($env:TEST_REPORTS_URL)"
+        ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
   release_plan:
     name: Resolve version and tag release

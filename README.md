@@ -47,6 +47,18 @@ The workflow exposes `sha`, `releaseVersion`, `nugetArtifactName` and
 invocation, so a calling workflow can use this workflow more than once. Published
 binaries are provided as `publish.tar` to preserve executable permissions.
 
+## SonarQube Cloud
+
+When Sonar analysis is enabled, the workflow loads `SonarQube.Analysis.xml`
+from the calling repository root if the file exists. Use it for repository
+settings such as coverage exclusions and report paths. Keep credentials in the
+`SONAR_TOKEN` secret and pass the project key and organization as workflow inputs.
+
+Without the file, the workflow uses the default OpenCover report pattern
+`**/TestResults/**/*opencover.xml`. If the file is present and your project
+produces OpenCover reports, set `sonar.cs.opencover.reportsPaths` in the file
+to the matching pattern.
+
 ## GitVersion Warm-up
 On Linux, the workflow runs GitVersion's `GetVersion` target once after restore
 when the selected project has GitVersion enabled. This avoids the concurrent mutex initialization failure
@@ -109,6 +121,10 @@ The script receives `BAS_CB_BUILD_TYPE` and `BAS_CB_ARTIFACTS_PATH` from the wor
 inputs and runs from the checked-out repository root. The existing `runDotnetTest`
 switch remains independent and retains its original behavior. Verification runs
 after Sonar analysis has ended; this hook does not import test coverage into Sonar.
+
+Verification scripts can write individual TRX reports to
+`BAS_CB_TEST_RESULTS_PATH`. The workflow shows their totals in the run summary
+and uploads the TRX files as an artifact, including when verification fails.
 
 For package integration tests that need the producer package first:
 
